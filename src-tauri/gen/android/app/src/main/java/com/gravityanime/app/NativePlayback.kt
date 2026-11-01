@@ -12,7 +12,6 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
-import androidx.media3.exoplayer.source.SingleSampleMediaSource
 
 data class PlayRequest(
     val title: String,
@@ -68,6 +67,26 @@ object NativePlayback {
             putExtra("positionMs", posMs)
         }
 
+    private fun subtitleMime(url: String): String = when {
+        url.contains(".srt") -> MimeTypes.APPLICATION_SUBRIP
+        url.contains(".ass") || url.contains(".ssa") -> MimeTypes.TEXT_SSA
+        else -> MimeTypes.TEXT_VTT
+    }
+
+    private fun mediaItem(url: String, subtitleUrl: String? = null): MediaItem {
+        val b = MediaItem.Builder().setUri(url)
+        if (url.contains(".m3u8")) b.setMimeType(MimeTypes.APPLICATION_M3U8)
+        if (subtitleUrl != null) {
+            val sub = MediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitleUrl))
+                .setMimeType(subtitleMime(subtitleUrl))
+                .setLanguage("en")
+                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                .build()
+            b.setSubtitleConfigurations(listOf(sub))
+        }
+        return b.build()
+    }
+
     fun buildSource(r: PlayRequest): MediaSource {
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent(UA)
@@ -75,28 +94,10 @@ object NativePlayback {
             .setDefaultRequestProperties(mapOf("Referer" to r.referer))
         val factory = DefaultMediaSourceFactory(http)
 
-        fun item(url: String): MediaItem {
-            val b = MediaItem.Builder().setUri(url)
-            if (url.contains(".m3u8")) b.setMimeType(MimeTypes.APPLICATION_M3U8)
-            return b.build()
-        }
-
-        val video = factory.createMediaSource(item(r.videoUrl))
-        val parts = mutableListOf<MediaSource>(video)
-        r.audioUrl?.let { parts.add(factory.createMediaSource(item(it))) }
-        r.subtitleUrl?.let { url ->
-            val mime = when {
-                url.contains(".srt") -> MimeTypes.APPLICATION_SUBRIP
-                url.contains(".ass") || url.contains(".ssa") -> MimeTypes.TEXT_SSA
-                else -> MimeTypes.TEXT_VTT
-            }
-            val sub = MediaItem.SubtitleConfiguration.Builder(Uri.parse(url))
-                .setMimeType(mime)
-                .setLanguage("en")
-                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                .build()
-            parts.add(SingleSampleMediaSource.Factory(http).createMediaSource(sub, C.TIME_UNSET))
-        }
-        return if (parts.size == 1) video else MergingMediaSource(*parts.toTypedArray())
+        // Subtitles ride on the video item; the factory loads and parses them correctly.
+        val video = factory.createMediaSource(mediaItem(r.videoUrl, r.subtitleUrl))
+        val audioUrl = r.audioUrl ?: return video
+        val audio = factory.createMediaSource(mediaItem(audioUrl))
+        return MergingMediaSource(video, audio)
     }
 }
