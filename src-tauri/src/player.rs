@@ -68,16 +68,38 @@ pub struct PlayRequest<'a> {
     /// mpv only: Lua script that writes `eof_marker` when playback reaches the end of the file.
     pub eof_script: Option<&'a str>,
     pub eof_marker: Option<&'a str>,
+    /// Seconds to start from (0 = the beginning).
+    pub start_secs: u64,
 }
 
 /// mpv script: creates the marker file only when the episode played to its end
 /// (reason "eof"), not when the user quits early. Lets the app tell "finished" from "closed".
 pub const EOF_SCRIPT: &str = r#"local marker = mp.get_opt("anigui-eof-file")
+local pos_file = marker and (marker .. ".pos")
+local last_pos, last_dur = 0, 0
+
+mp.observe_property("time-pos", "number", function(_, v)
+    if v then last_pos = v end
+end)
+mp.observe_property("duration", "number", function(_, v)
+    if v then last_dur = v end
+end)
+
 mp.register_event("end-file", function(event)
     if marker and event.reason == "eof" then
         local f = io.open(marker, "w")
         if f then
             f:write("eof")
+            f:close()
+        end
+    end
+end)
+
+mp.register_event("shutdown", function()
+    if pos_file then
+        local f = io.open(pos_file, "w")
+        if f then
+            f:write(string.format("%d,%d", math.floor(last_pos), math.floor(last_dur)))
             f:close()
         end
     end
@@ -107,12 +129,18 @@ pub fn build_args(kind: PlayerKind, req: &PlayRequest) -> Vec<OsString> {
                 args.push(format!("--script={script}").into());
                 args.push(format!("--script-opts=anigui-eof-file={marker}").into());
             }
+            if req.start_secs > 0 {
+                args.push(format!("--start={}", req.start_secs).into());
+            }
             args.push(format!("--force-media-title={}", req.title).into());
             args.push(req.video_url.into());
         }
         PlayerKind::Vlc => {
             args.push(format!("--http-referrer={}", req.referer).into());
             args.push("--play-and-exit".into());
+            if req.start_secs > 0 {
+                args.push(format!("--start-time={}", req.start_secs).into());
+            }
             args.push(format!("--meta-title={}", req.title).into());
             args.push(req.video_url.into());
             let slaves: Vec<&str> = [req.audio_url, req.subtitle_url]
@@ -293,6 +321,7 @@ mod tests {
             subtitle_url: sub,
             eof_script: None,
             eof_marker: None,
+            start_secs: 0,
         }
     }
 

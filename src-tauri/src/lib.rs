@@ -312,54 +312,27 @@ struct PlaybackEnded {
     message: String,
 }
 
-#[cfg(target_os = "android")]
-#[tauri::command]
-async fn play_episode(
-    app: tauri::AppHandle,
-    anime_id: String,
-    anime_title: String,
-    anime_poster: Option<String>,
-    episode: ani_engine::Episode,
-    dub: bool,
+/// A stream picked for one episode: URLs plus the quality that was actually chosen.
+struct Prepared {
+    video_url: String,
+    referer: String,
+    audio_url: Option<String>,
+    subtitle_url: Option<String>,
     quality: String,
-) -> Result<PlaybackStarted, String> {
-    android_player::play(
-        app,
-        anime_id,
-        anime_title,
-        anime_poster,
-        episode,
-        dub,
-        quality,
-    )
-    .await
+    fell_back: bool,
 }
 
-/// Resolve the episode's stream, pick a quality and open it in the player chosen in
-/// Settings. Returns as soon as the player has started; a `playback-ended` event
-/// follows when the player closes.
-#[cfg(not(target_os = "android"))]
-#[tauri::command]
-async fn play_episode(
-    app: tauri::AppHandle,
-    anime_id: String,
-    anime_title: String,
-    anime_poster: Option<String>,
-    episode: ani_engine::Episode,
+/// Resolve the episode's stream and pick a quality (falling back to the best one, like
+/// ani-cli). Also used to get a fresh link when a stream has expired.
+async fn prepare_stream(
+    anime_id: &str,
+    episode: &ani_engine::Episode,
     dub: bool,
-    quality: String,
-) -> Result<PlaybackStarted, String> {
-    let dir = data_dir(&app)?;
-    let settings = persist::load_settings(&dir);
-    let kind = kind_of(settings.player);
-
-    // Check for the player first so a missing install fails fast, before any network work.
-    let found = player::find_player(kind, settings.custom_path(settings.player))
-        .ok_or_else(|| player::missing_message(kind))?;
-
+    quality: &str,
+) -> Result<Prepared, String> {
     let engine = ani_engine::AniEngine::new().map_err(|e| e.to_string())?;
     let resolved = engine
-        .resolve_episode(&anime_id, &episode, dub)
+        .resolve_episode(anime_id, episode, dub)
         .await
         .map_err(|e| {
             format!(
@@ -368,7 +341,6 @@ async fn play_episode(
             )
         })?;
 
-    // Like ani-cli: fall back to the best quality if the requested one isn't offered.
     let wanted = if quality.trim().is_empty() {
         "best"
     } else {
@@ -381,16 +353,92 @@ async fn play_episode(
             true,
         ),
     };
-
-    // ani-cli uses the provider's default subtitle track, if there is one.
     let subtitle_url = resolved
         .subtitles
         .iter()
         .find(|s| s.is_default)
         .map(|s| s.url.clone());
+    Ok(Prepared {
+        video_url: source.url.clone(),
+        referer: resolved.referer.clone(),
+        audio_url: resolved.audio_url.clone(),
+        subtitle_url,
+        quality: source.quality.clone(),
+        fell_back,
+    })
+}
+
+/// Reads the "position,duration" file the mpv script writes when mpv quits.
+#[cfg(not(target_os = "android"))]
+fn read_saved_position(path: &std::path::Path) -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut parts = text.trim().split(',');
+    let pos = parts.next()?.trim().parse::<u64>().ok()?;
+    let dur = parts
+        .next()
+        .and_then(|d| d.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    Some((pos, dur))
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn play_episode(
+    app: tauri::AppHandle,
+    anime_id: String,
+    anime_title: String,
+    anime_poster: Option<String>,
+    episode: ani_engine::Episode,
+    dub: bool,
+    quality: String,
+    from_start: Option<bool>,
+) -> Result<PlaybackStarted, String> {
+    android_player::play(
+        app,
+        anime_id,
+        anime_title,
+        anime_poster,
+        episode,
+        dub,
+        quality,
+        from_start,
+    )
+    .await
+}
+
+/// Resolve the episode's stream, pick a quality and open it in the player chosen in
+/// Settings. Returns as soon as the player has started; a `playback-ended` event
+/// follows when the player closes. Resumes from the saved position unless `from_start`
+/// is true, and retries once with a fresh link if the stream fails.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn play_episode(
+    app: tauri::AppHandle,
+    anime_id: String,
+    anime_title: String,
+    anime_poster: Option<String>,
+    episode: ani_engine::Episode,
+    dub: bool,
+    quality: String,
+    from_start: Option<bool>,
+) -> Result<PlaybackStarted, String> {
+    let dir = data_dir(&app)?;
+    let settings = persist::load_settings(&dir);
+    let kind = kind_of(settings.player);
+
+    // Check for the player first so a missing install fails fast, before any network work.
+    let found = player::find_player(kind, settings.custom_path(settings.player))
+        .ok_or_else(|| player::missing_message(kind))?;
+
+    let prepared = prepare_stream(&anime_id, &episode, dub, &quality).await?;
+    let start_secs = if from_start.unwrap_or(false) {
+        0
+    } else {
+        store::resume_point(&persist::load_history(&dir), &anime_id, &episode.id)
+    };
     let title = format!("{} Episode {}", anime_title, episode.number);
 
-    // mpv only: a tiny script tells us if the episode reached its end (vs. the user quitting).
+    // mpv only: a small script reports whether the episode reached its end and where it stopped.
     let marker: PathBuf = dir.join(format!(
         "playback-{}.eof",
         SystemTime::now()
@@ -398,7 +446,9 @@ async fn play_episode(
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
+    let pos_file = PathBuf::from(format!("{}.pos", marker.display()));
     let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_file(&pos_file);
     let (script_arg, marker_arg) = if kind == PlayerKind::Mpv {
         match player::write_eof_script(&dir) {
             // Forward slashes work on Windows too and avoid mpv option-escaping surprises.
@@ -414,14 +464,15 @@ async fn play_episode(
 
     let request = player::PlayRequest {
         title: &title,
-        video_url: &source.url,
-        referer: &resolved.referer,
-        audio_url: resolved.audio_url.as_deref(),
-        subtitle_url: subtitle_url.as_deref(),
+        video_url: &prepared.video_url,
+        referer: &prepared.referer,
+        audio_url: prepared.audio_url.as_deref(),
+        subtitle_url: prepared.subtitle_url.as_deref(),
         eof_script: script_arg.as_deref(),
         eof_marker: marker_arg.as_deref(),
+        start_secs,
     };
-    let mut child = player::spawn(&found, &request).map_err(|e| format!("{e:#}"))?;
+    let child = player::spawn(&found, &request).map_err(|e| format!("{e:#}"))?;
     ACTIVE_PLAYER_PID.store(child.id(), Ordering::SeqCst);
 
     // Remember what is being watched (best effort).
@@ -435,37 +486,102 @@ async fn play_episode(
                 episode_id: episode.id.clone(),
                 episode_number: episode.number.clone(),
                 completed: false,
+                position_secs: start_secs,
+                duration_secs: 0,
                 updated_at: now_secs(),
             },
         )
     });
 
-    // Reap the child, record completion, and tell the UI how it ended.
+    let episode_id = episode.id.clone();
+    let episode_number = episode.number.clone();
     let ended_anime_id = anime_id.clone();
     let ended_episode_id = episode.id.clone();
-    let episode_number = episode.number.clone();
     let history_dir = dir.clone();
     let watch_marker = marker_arg.is_some();
+    let thread_found = found.clone();
+    let retry_quality = quality.clone();
+    let retry_title = title.clone();
+    let retry_script = script_arg.clone();
+    let retry_marker_arg = marker_arg.clone();
+    let thread_episode_number = episode_number.clone();
+
+    // Reap the child, save progress, retry once with a fresh link on failure, and tell the UI.
     std::thread::spawn(move || {
-        let code = child.wait().ok().and_then(|status| status.code());
-        ACTIVE_PLAYER_PID.store(0, Ordering::SeqCst);
-        let failed = player::exit_code_is_failure(kind, code);
-        let completed = !failed && watch_marker && marker.is_file();
-        let _ = std::fs::remove_file(&marker);
-        if completed {
-            let _ = persist::update_history(&history_dir, |entries| {
-                store::mark_completed(entries, &ended_anime_id, &ended_episode_id, now_secs());
-            });
-        }
+        let mut child = child;
+        let mut start = start_secs;
+        let mut retried = false;
+        let (code, failed, completed) = loop {
+            let code = child.wait().ok().and_then(|status| status.code());
+            ACTIVE_PLAYER_PID.store(0, Ordering::SeqCst);
+            let failed = player::exit_code_is_failure(kind, code);
+            let completed = !failed && watch_marker && marker.is_file();
+            let saved = read_saved_position(&pos_file);
+
+            if failed && !retried {
+                retried = true;
+                eprintln!("[play] the stream failed; retrying once with a fresh link");
+                if let Some((pos, _)) = saved {
+                    if pos >= 5 {
+                        start = pos;
+                    }
+                }
+                let _ = std::fs::remove_file(&marker);
+                let _ = std::fs::remove_file(&pos_file);
+                if let Ok(fresh) = tauri::async_runtime::block_on(prepare_stream(
+                    &ended_anime_id,
+                    &episode,
+                    dub,
+                    &retry_quality,
+                )) {
+                    let request = player::PlayRequest {
+                        title: &retry_title,
+                        video_url: &fresh.video_url,
+                        referer: &fresh.referer,
+                        audio_url: fresh.audio_url.as_deref(),
+                        subtitle_url: fresh.subtitle_url.as_deref(),
+                        eof_script: retry_script.as_deref(),
+                        eof_marker: retry_marker_arg.as_deref(),
+                        start_secs: start,
+                    };
+                    if let Ok(next) = player::spawn(&thread_found, &request) {
+                        ACTIVE_PLAYER_PID.store(next.id(), Ordering::SeqCst);
+                        child = next;
+                        continue;
+                    }
+                }
+            }
+
+            if completed {
+                let _ = persist::update_history(&history_dir, |entries| {
+                    store::mark_completed(entries, &ended_anime_id, &ended_episode_id, now_secs());
+                });
+            } else if let Some((pos, dur)) = saved {
+                let _ = persist::update_history(&history_dir, |entries| {
+                    store::record_progress(
+                        entries,
+                        &ended_anime_id,
+                        &ended_episode_id,
+                        pos,
+                        dur,
+                        now_secs(),
+                    );
+                });
+            }
+            let _ = std::fs::remove_file(&marker);
+            let _ = std::fs::remove_file(&pos_file);
+            break (code, failed, completed);
+        };
+
         let message = if failed {
             format!(
-                "The player could not play episode {episode_number} (exit code {}). The stream may have expired or the provider may have changed; try again.",
+                "The player could not play episode {thread_episode_number} (exit code {}). The stream may have expired or the provider may have changed; try again.",
                 code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())
             )
         } else if completed {
-            format!("Finished episode {episode_number}.")
+            format!("Finished episode {thread_episode_number}.")
         } else {
-            format!("Player closed during episode {episode_number}.")
+            format!("Player closed during episode {thread_episode_number}.")
         };
         let _ = app.emit(
             "playback-ended",
@@ -480,27 +596,37 @@ async fn play_episode(
         );
     });
 
+    let resume_note = if start_secs > 0 {
+        format!(" Resuming from {}:{:02}.", start_secs / 60, start_secs % 60)
+    } else {
+        String::new()
+    };
+    let wanted = if quality.trim().is_empty() {
+        "best"
+    } else {
+        quality.trim()
+    };
     let mut message = format!(
-        "Playing episode {} at {} in {}.",
-        episode.number,
-        source.quality,
-        found.display_name()
+        "Playing episode {} at {} in {}.{}",
+        episode_number,
+        prepared.quality,
+        found.display_name(),
+        resume_note
     );
-    if fell_back {
+    if prepared.fell_back {
         message = format!(
             "{wanted} isn't available for this episode, so the best quality was used. {message}"
         );
     }
     Ok(PlaybackStarted {
-        episode_id: episode.id,
+        episode_id,
         player: found.display_name(),
-        quality: source.quality,
-        has_subtitles: subtitle_url.is_some(),
-        has_separate_audio: resolved.audio_url.is_some(),
+        quality: prepared.quality,
+        has_subtitles: prepared.subtitle_url.is_some(),
+        has_separate_audio: prepared.audio_url.is_some(),
         message,
     })
 }
-
 #[derive(serde::Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct VersionItem {

@@ -25,6 +25,9 @@ class PlayerActivity : Activity() {
     private var failed = false
     private var message: String? = null
     private var resultSent = false
+    private var forwarded = false
+    private var lastPos = 0L
+    private var lastDur = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,8 +69,9 @@ class PlayerActivity : Activity() {
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                android.util.Log.e("PlayerActivity", "Playback failed", error)
                 failed = true
-                message = "${error.errorCodeName}: ${error.message}"
+                message = "${error.errorCodeName}: ${error.cause?.javaClass?.simpleName} ${error.cause?.message}"
                 sendResultAndFinish()
             }
         })
@@ -83,24 +87,50 @@ class PlayerActivity : Activity() {
         i.addFlags(Intent.FLAG_ACTIVITY_FORWARD_RESULT)
         player?.release()
         player = null
+        forwarded = true
         resultSent = true
         startActivity(i)
         finish()
     }
 
+    /** Stores the result the plugin will receive, with the latest position. */
+    private fun updateResult() {
+        if (forwarded) return
+        player?.let { p ->
+            lastPos = p.currentPosition.coerceAtLeast(0L)
+            lastDur = p.duration.let { if (it < 0L) 0L else it }
+        }
+        setResult(
+            RESULT_OK,
+            Intent()
+                .putExtra("completed", completed)
+                .putExtra("failed", failed)
+                .putExtra("message", message)
+                .putExtra("positionMs", if (completed) 0L else lastPos)
+                .putExtra("durationMs", lastDur)
+        )
+    }
+
     private fun sendResultAndFinish() {
         if (resultSent) return
         resultSent = true
-        setResult(
-            RESULT_OK,
-            NativePlayback.resultIntent(completed, failed, message, player?.currentPosition ?: 0L)
-        )
         finish()
+    }
+
+    override fun finish() {
+        updateResult()
+        super.finish()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        updateResult()
     }
 
     override fun onStop() {
         super.onStop()
         player?.pause()
+        updateResult()
     }
 
     override fun onDestroy() {
