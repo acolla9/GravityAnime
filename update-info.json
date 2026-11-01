@@ -1,12 +1,19 @@
 {
   "current_version": {
-    "version": "0.2.0",
-    "release_date": "2026-10-29",
-    "notes": "Release v0.2.0",
-    "download_url": "https://github.com/acolla9/GravityAnime/releases/download/v0.2.0/GravityAnime-Setup.exe",
-    "installer_url": "https://github.com/acolla9/GravityAnime/releases/download/v0.2.0/GravityAnime-Setup.exe"
+    "version": "0.3.0",
+    "release_date": "2026-10-31",
+    "notes": "Release v0.3.0",
+    "download_url": "https://github.com/acolla9/GravityAnime/releases/download/v0.3.0/GravityAnime-Setup.exe",
+    "installer_url": "https://github.com/acolla9/GravityAnime/releases/download/v0.3.0/GravityAnime-Setup.exe"
   },
   "all_previous_versions": [
+    {
+      "version": "0.2.0",
+      "release_date": "2026-10-29",
+      "notes": "Release v0.2.0",
+      "download_url": "https://github.com/acolla9/GravityAnime/releases/download/v0.2.0/GravityAnime-Setup.exe",
+      "installer_url": "https://github.com/acolla9/GravityAnime/releases/download/v0.2.0/GravityAnime-Setup.exe"
+    },
     {
       "version": "0.1.0",
       "release_date": "2026-10-29",
