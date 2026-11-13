@@ -2,7 +2,7 @@
 //! A corrupt or missing file falls back to defaults instead of breaking the app.
 
 use crate::store::{HistoryEntry, Settings};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{fs, io, path::Path, path::PathBuf, sync::Mutex};
 
 // Playback threads and commands both edit history; serialise read-modify-write.
@@ -14,6 +14,18 @@ fn settings_path(dir: &Path) -> PathBuf {
 
 fn history_path(dir: &Path) -> PathBuf {
     dir.join("history.json")
+}
+
+fn anilist_path(dir: &Path) -> PathBuf {
+    dir.join("anilist.json")
+}
+
+/// The AniList token lives in its own file so it never travels with the settings
+/// that are sent to the UI.
+#[derive(Default, Serialize, Deserialize)]
+struct AniListAuth {
+    #[serde(default)]
+    token: String,
 }
 
 fn read_json<T: DeserializeOwned + Default>(path: &Path) -> T {
@@ -55,4 +67,30 @@ pub fn update_history<F: FnOnce(&mut Vec<HistoryEntry>)>(
     change(&mut entries);
     write_json(&history_path(dir), &entries)?;
     Ok(entries)
+}
+
+pub fn load_anilist_token(dir: &Path) -> Option<String> {
+    let auth: AniListAuth = read_json(&anilist_path(dir));
+    let token = auth.token.trim().to_string();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+pub fn save_anilist_token(dir: &Path, token: &str) -> io::Result<()> {
+    write_json(
+        &anilist_path(dir),
+        &AniListAuth {
+            token: token.to_string(),
+        },
+    )
+}
+
+pub fn clear_anilist_token(dir: &Path) -> io::Result<()> {
+    match fs::remove_file(anilist_path(dir)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }

@@ -1,4 +1,5 @@
 mod ani_engine;
+mod anilist;
 mod persist;
 mod player;
 mod store;
@@ -320,6 +321,8 @@ struct Prepared {
     subtitle_url: Option<String>,
     quality: String,
     fell_back: bool,
+    /// MyAnimeList id from the stream provider, used to find the show on AniList.
+    mal_id: Option<String>,
 }
 
 /// Resolve the episode's stream and pick a quality (falling back to the best one, like
@@ -365,6 +368,7 @@ async fn prepare_stream(
         subtitle_url,
         quality: source.quality.clone(),
         fell_back,
+        mal_id: resolved.mal_id.clone(),
     })
 }
 
@@ -505,6 +509,8 @@ async fn play_episode(
     let retry_script = script_arg.clone();
     let retry_marker_arg = marker_arg.clone();
     let thread_episode_number = episode_number.clone();
+    let sync_title = anime_title.clone();
+    let mut sync_mal_id = prepared.mal_id.clone();
 
     // Reap the child, save progress, retry once with a fresh link on failure, and tell the UI.
     std::thread::spawn(move || {
@@ -534,6 +540,9 @@ async fn play_episode(
                     dub,
                     &retry_quality,
                 )) {
+                    if fresh.mal_id.is_some() {
+                        sync_mal_id = fresh.mal_id.clone();
+                    }
                     let request = player::PlayRequest {
                         title: &retry_title,
                         video_url: &fresh.video_url,
@@ -556,6 +565,12 @@ async fn play_episode(
                 let _ = persist::update_history(&history_dir, |entries| {
                     store::mark_completed(entries, &ended_anime_id, &ended_episode_id, now_secs());
                 });
+                tauri::async_runtime::spawn(sync_anilist_after_finish(
+                    history_dir.clone(),
+                    sync_mal_id.clone(),
+                    sync_title.clone(),
+                    thread_episode_number.clone(),
+                ));
             } else if let Some((pos, dur)) = saved {
                 let _ = persist::update_history(&history_dir, |entries| {
                     store::record_progress(
@@ -627,6 +642,101 @@ async fn play_episode(
         message,
     })
 }
+// ---------------------------------------------------------------------------
+// AniList
+// ---------------------------------------------------------------------------
+
+/// Best effort: push a finished episode to AniList when sync is on and a token is saved.
+/// Failures are only logged; they must never get in the way of playback.
+async fn sync_anilist_after_finish(
+    dir: PathBuf,
+    mal_id: Option<String>,
+    anime_title: String,
+    episode_number: String,
+) {
+    if !persist::load_settings(&dir).sync_anilist {
+        return;
+    }
+    let Some(token) = persist::load_anilist_token(&dir) else {
+        return;
+    };
+    match anilist::sync_progress(&token, mal_id.as_deref(), &anime_title, &episode_number).await {
+        Ok(message) => eprintln!("[anilist] {message}"),
+        Err(error) => eprintln!("[anilist] sync failed: {error:#}"),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AniListStatus {
+    logged_in: bool,
+    username: Option<String>,
+    message: String,
+}
+
+fn anilist_logged_out(message: &str) -> AniListStatus {
+    AniListStatus {
+        logged_in: false,
+        username: None,
+        message: message.to_string(),
+    }
+}
+
+#[tauri::command]
+async fn anilist_status(app: tauri::AppHandle) -> Result<AniListStatus, String> {
+    let dir = data_dir(&app)?;
+    let Some(token) = persist::load_anilist_token(&dir) else {
+        return Ok(anilist_logged_out("Not logged in to AniList."));
+    };
+    match anilist::viewer(&token).await {
+        Ok(name) => Ok(AniListStatus {
+            logged_in: true,
+            message: format!("Logged in as {name}."),
+            username: Some(name),
+        }),
+        Err(error) if anilist::is_token_rejected(&error) => Ok(anilist_logged_out(
+            "The saved AniList token is no longer valid. Log in again.",
+        )),
+        // Offline or AniList is down: the token itself may still be fine.
+        Err(error) => Ok(AniListStatus {
+            logged_in: true,
+            username: None,
+            message: format!("Token saved, but AniList could not be reached: {error:#}"),
+        }),
+    }
+}
+
+#[tauri::command]
+async fn anilist_login(app: tauri::AppHandle, token: String) -> Result<AniListStatus, String> {
+    let dir = data_dir(&app)?;
+    let cleaned = anilist::clean_token(&token);
+    if cleaned.is_empty() {
+        return Err("Paste your AniList access token first.".to_string());
+    }
+    let name = anilist::viewer(&cleaned).await.map_err(|error| {
+        if anilist::is_token_rejected(&error) {
+            "AniList did not accept that token. Make sure you copied all of it.".to_string()
+        } else {
+            format!("{error:#}")
+        }
+    })?;
+    persist::save_anilist_token(&dir, &cleaned)
+        .map_err(|e| format!("could not save the AniList token: {e}"))?;
+    Ok(AniListStatus {
+        logged_in: true,
+        message: format!("Logged in as {name}."),
+        username: Some(name),
+    })
+}
+
+#[tauri::command]
+fn anilist_logout(app: tauri::AppHandle) -> Result<AniListStatus, String> {
+    let dir = data_dir(&app)?;
+    persist::clear_anilist_token(&dir)
+        .map_err(|e| format!("could not remove the AniList token: {e}"))?;
+    Ok(anilist_logged_out("Logged out of AniList."))
+}
+
 #[derive(serde::Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct VersionItem {
@@ -819,7 +929,10 @@ pub fn run() {
             get_history,
             remove_history,
             clear_history,
-            play_episode
+            play_episode,
+            anilist_status,
+            anilist_login,
+            anilist_logout
         ])
         .run(tauri::generate_context!())
         .expect("error while running GravityAnime");

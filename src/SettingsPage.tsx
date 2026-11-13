@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Tv, Volume2, History, Check, ShieldAlert, Monitor, Sparkles, OctagonAlert, Keyboard, RotateCcw, ArrowDownCircle, RefreshCw, ExternalLink } from 'lucide-react';
-import type { PlayerChoice, PlayersInfo, Settings } from './types';
-import { QUALITIES } from './types';
+import { Tv, Volume2, History, Check, ShieldAlert, Monitor, Sparkles, OctagonAlert, Keyboard, RotateCcw, ArrowDownCircle, RefreshCw, ExternalLink, Link2, Copy, LogOut } from 'lucide-react';
+import type { AniListStatus, PlayerChoice, PlayersInfo, Settings } from './types';
+import { ANILIST_AUTH_URL, QUALITIES } from './types';
 
 type Props = {
   settings: Settings;
@@ -26,6 +26,15 @@ export function SettingsPage({ settings, players, historyCount, onSave, onClearH
   const [updateUrl, setUpdateUrl] = useState(settings.updateUrl || '');
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+  const [ani, setAni] = useState<AniListStatus | null>(null);
+  const [aniToken, setAniToken] = useState('');
+  const [aniBusy, setAniBusy] = useState(false);
+  const [aniError, setAniError] = useState('');
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  useEffect(() => {
+    void refreshAniList();
+  }, []);
 
   useEffect(() => {
     setMpvPath(settings.mpvPath);
@@ -60,6 +69,56 @@ export function SettingsPage({ settings, players, historyCount, onSave, onClearH
       setUpdateStatus(typeof e === 'string' ? e : 'Could not check for updates');
     } finally {
       setCheckingUpdate(false);
+    }
+  }
+
+  async function aniInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke<T>(command, args);
+  }
+
+  async function refreshAniList() {
+    try {
+      setAni(await aniInvoke<AniListStatus>('anilist_status'));
+    } catch {
+      setAni(null); // not running inside Tauri (browser preview)
+    }
+  }
+
+  async function aniLogin() {
+    const token = aniToken.trim();
+    if (!token) return;
+    setAniBusy(true);
+    setAniError('');
+    try {
+      setAni(await aniInvoke<AniListStatus>('anilist_login', { token }));
+      setAniToken('');
+    } catch (e) {
+      setAniError(typeof e === 'string' ? e : 'Could not log in to AniList.');
+    } finally {
+      setAniBusy(false);
+    }
+  }
+
+  async function aniLogout() {
+    setAniBusy(true);
+    setAniError('');
+    try {
+      setAni(await aniInvoke<AniListStatus>('anilist_logout'));
+    } catch (e) {
+      setAniError(typeof e === 'string' ? e : 'Could not log out of AniList.');
+    } finally {
+      setAniBusy(false);
+    }
+  }
+
+  async function copyAuthLink() {
+    try {
+      await navigator.clipboard.writeText(ANILIST_AUTH_URL);
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable: the link is still shown in the box */
     }
   }
 
@@ -353,6 +412,95 @@ export function SettingsPage({ settings, players, historyCount, onSave, onClearH
         </div>
 
         
+        {/* Card: AniList */}
+        <div className="card-box">
+          <div className="card-box-header">
+            <div className="card-box-title-wrap">
+              <Link2 size={18} className="card-icon" />
+              <div>
+                <h2 className="card-box-title">AniList</h2>
+                <p className="card-box-sub">Update your AniList progress when an episode finishes.</p>
+              </div>
+            </div>
+          </div>
+
+          {ani?.loggedIn ? (
+            <div className="card-rows">
+              <div className="card-row">
+                <div className="row-text">
+                  <strong>{ani.username ? `Logged in as ${ani.username}` : 'Logged in'}</strong>
+                  <small>{ani.username ? 'Finished episodes are added to your list.' : ani.message}</small>
+                </div>
+                <button type="button" className="card-btn secondary" disabled={aniBusy} onClick={aniLogout}>
+                  <LogOut size={14} /> Log out
+                </button>
+              </div>
+
+              <div className="card-row">
+                <div className="row-text">
+                  <strong>Sync Progress</strong>
+                  <small>Only raises your progress, never lowers it.</small>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={settings.syncAnilist}
+                    onChange={e => update({ syncAnilist: e.target.checked })}
+                  />
+                  <span className="switch-track" />
+                  <span className="visually-hidden">Sync watch progress to AniList</span>
+                </label>
+              </div>
+            </div>
+          ) : (
+            <div className="card-content-block">
+              {ani && ani.message && <p className="update-help-note">{ani.message}</p>}
+
+              <div className="card-form-section">
+                <label className="card-field-label" htmlFor="anilist-link">
+                  1. Open this link in your browser and authorize the app
+                </label>
+                {ANILIST_AUTH_URL ? (
+                  <div className="update-status-row">
+                    <input id="anilist-link" className="card-input" readOnly value={ANILIST_AUTH_URL} onFocus={e => e.currentTarget.select()} />
+                    <button type="button" className="card-btn secondary" onClick={copyAuthLink}>
+                      <Copy size={14} /> {linkCopied ? 'Copied' : 'Copy'}
+                    </button>
+                  </div>
+                ) : (
+                  <p className="update-help-note">
+                    Set <code>ANILIST_CLIENT_ID</code> in <code>types.ts</code> first (create a client at anilist.co/settings/developer
+                    with redirect URL <code>https://anilist.co/api/v2/oauth/pin</code>).
+                  </p>
+                )}
+              </div>
+
+              <div className="card-form-section mt-3">
+                <label className="card-field-label" htmlFor="anilist-token">
+                  2. Paste the token AniList shows you
+                </label>
+                <input
+                  id="anilist-token"
+                  className="card-input"
+                  type="password"
+                  autoComplete="off"
+                  value={aniToken}
+                  placeholder="Access token"
+                  onChange={e => setAniToken(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && void aniLogin()}
+                />
+              </div>
+
+              <div className="update-status-row mt-3">
+                <button type="button" className="card-btn secondary" disabled={aniBusy || !aniToken.trim()} onClick={aniLogin}>
+                  {aniBusy ? 'Checking…' : 'Log in'}
+                </button>
+                {aniError && <span className="update-status-text">{aniError}</span>}
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Card: Auto Updates & GitHub Release Channel */}
         <div className="card-box">
           <div className="card-box-header">

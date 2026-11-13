@@ -14,6 +14,7 @@ export type Settings = {
   autoPlayNext: boolean;
   panicKey: string;
   updateUrl: string;
+  syncAnilist: boolean;
 };
 export type PlayersInfo = { selected: PlayerChoice; mpv: string | null; vlc: string | null; selectedFound: boolean; message: string };
 
@@ -26,6 +27,8 @@ export type UpdateCheckResult = {
   downloadUrl?: string;
   allPreviousVersions: { version: string; releaseDate?: string; notes?: string; downloadUrl?: string }[];
 };
+
+export type AniListStatus = { loggedIn: boolean; username?: string | null; message: string };
 
 export type HistoryEntry = {
   animeId: string;
@@ -61,4 +64,15 @@ export const DEFAULT_SETTINGS: Settings = {
   autoPlayNext: true,
   panicKey: 'F12',
   updateUrl: DEFAULT_UPDATE_URL,
+  syncAnilist: true,
 };
+
+/**
+ * Client ID of your AniList API client (https://anilist.co/settings/developer).
+ * Set its redirect URL to https://anilist.co/api/v2/oauth/pin so AniList shows the token to copy.
+ */
+export const ANILIST_CLIENT_ID = '56565';
+
+export const ANILIST_AUTH_URL = ANILIST_CLIENT_ID
+  ? `https://anilist.co/api/v2/oauth/authorize?client_id=${ANILIST_CLIENT_ID}&response_type=token`
+  : '';

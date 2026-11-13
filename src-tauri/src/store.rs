@@ -29,6 +29,8 @@ pub struct Settings {
     pub auto_play_next: bool,
     pub panic_key: String,
     pub update_url: String,
+    /// Push finished episodes to AniList when logged in.
+    pub sync_anilist: bool,
 }
 
 impl Default for Settings {
@@ -42,6 +44,7 @@ impl Default for Settings {
             auto_play_next: true,
             panic_key: "F12".to_string(),
             update_url: "https://raw.githubusercontent.com/AidenColla/AniGUI/main/update-info.json".to_string(),
+            sync_anilist: true,
         }
     }
 }
@@ -314,6 +317,7 @@ mod tests {
         assert_eq!(s.default_quality, "best");
         assert!(!s.default_dub);
         assert!(s.auto_play_next);
+        assert!(s.sync_anilist);
     }
 
     #[test]
@@ -352,5 +356,3 @@ mod tests {
         assert_eq!(s.custom_path(PlayerChoice::Mpv), None);
     }
 }
-
-

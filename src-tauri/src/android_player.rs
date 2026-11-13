@@ -5,7 +5,8 @@ use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
 use tauri::{Emitter, Manager, Runtime};
 
 use super::{
-    ani_engine, data_dir, now_secs, persist, prepare_stream, store, PlaybackEnded, PlaybackStarted,
+    ani_engine, data_dir, now_secs, persist, prepare_stream, store, sync_anilist_after_finish,
+    PlaybackEnded, PlaybackStarted,
 };
 
 pub struct PlayerHandle<R: Runtime>(pub PluginHandle<R>);
@@ -111,6 +112,8 @@ pub async fn play(
     let task_quality = quality.clone();
     let history_dir = dir.clone();
     let task_app = app.clone();
+    let task_title = anime_title.clone();
+    let mut task_mal_id = prepared.mal_id.clone();
 
     tauri::async_runtime::spawn(async move {
         let mut request = request;
@@ -138,6 +141,9 @@ pub async fn play(
                 if let Ok(fresh) =
                     prepare_stream(&ended_anime_id, &episode, dub, &task_quality).await
                 {
+                    if fresh.mal_id.is_some() {
+                        task_mal_id = fresh.mal_id.clone();
+                    }
                     request.video_url = fresh.video_url;
                     request.referer = fresh.referer;
                     request.audio_url = fresh.audio_url;
@@ -154,6 +160,12 @@ pub async fn play(
             let _ = persist::update_history(&history_dir, |entries| {
                 store::mark_completed(entries, &ended_anime_id, &task_episode_id, now_secs());
             });
+            tauri::async_runtime::spawn(sync_anilist_after_finish(
+                history_dir.clone(),
+                task_mal_id.clone(),
+                task_title.clone(),
+                task_episode_number.clone(),
+            ));
         } else if outcome.position_ms >= 5_000 {
             let _ = persist::update_history(&history_dir, |entries| {
                 store::record_progress(
